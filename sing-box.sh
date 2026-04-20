@@ -34,6 +34,85 @@ export CFPORT=${CFPORT:-'443'}
 [[ $EUID -ne 0 ]] && red "请在root用户下运行脚本" && exit 1
 
 # 检查命令是否存在函数
+# Clash YAML generator - installed automatically
+create_generate_clash_py() {
+    mkdir -p /etc/sing-box
+    cat > /etc/sing-box/generate_clash.py << 'PYGEN'
+import sys, urllib.parse, base64, json
+ifile, ofile = sys.argv[1], sys.argv[2]
+header = """port: 7890
+socks-port: 7891
+allow-lan: true
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:9090
+
+dns:
+  enable: true
+  listen: 0.0.0.0:53
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - 8.8.8.8
+    - 1.1.1.1
+
+proxies:
+"""
+out, names = [header], []
+with open(ifile) as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith("#") or "://" not in line: continue
+        proto = line.split("://", 1)[0]
+        if proto == "vless":
+            rest = line.split("://", 1)[1]; uuid = rest.split("@")[0]
+            hp = rest.split("@", 1)[1]; host = hp.split(":")[0]; port = hp.split(":", 1)[1].split("?")[0]
+            params = {}
+            if "?" in hp:
+                for p in hp.split("?", 1)[1].split("&"):
+                    if "=" in p: params[p.split("=", 1)[0]] = p.split("=", 1)[1]
+            name = urllib.parse.unquote(line.split("#")[-1]) or host
+            sni = params.get("sni", "www.bing.com"); flow = params.get("flow", "")
+            out += [f'  - name: "{name}"', "    type: vless", f"    server: {host}", f"    port: {port}", f"    uuid: {uuid}", "    tls: true"]
+            if flow: out.append(f"    flow: {flow}")
+            out += [f"    servername: {sni}", "    udp: true", "", ""]; names.append(name)
+        elif proto == "vmess":
+            try:
+                d = json.loads(base64.b64decode(line.split("://", 1)[1] + "=" * (4 - len(line.split("://", 1)[1]) % 4)).decode())
+                name = d.get("ps") or d.get("add") or "vmess"
+                host, port = d.get("add", ""), str(d.get("port", ""))
+                uuid, net, path = d.get("id", ""), d.get("net", "tcp"), d.get("path", "/")
+                host_hdr = d.get("host", "")
+                out += [f'  - name: "{name}"', "    type: vmess", f"    server: {host}", f"    port: {port}", f"    uuid: {uuid}", "    alterId: 0", "    cipher: auto", "    udp: true"]
+                if net == "ws": out += ["    network: ws", "    ws-opts:", f'    path: "{path}"']
+                else: out.append("    network: tcp")
+                if host_hdr: out += ["    headers:", f"    Host: {host_hdr}"]
+                out.append(""); names.append(name)
+            except: pass
+        elif proto in ("hysteria2", "hy2"):
+            rest = line.split("://", 1)[1]; uuid = rest.split("@")[0]
+            hp = rest.split("@", 1)[1]; host = hp.split(":")[0]; port = hp.split(":", 1)[1].split("?")[0]
+            name = urllib.parse.unquote(line.split("#")[-1]) or host
+            out += [f'  - name: "{name}"', "    type: hysteria2", f"    server: {host}", f"    port: {port}", f"    password: {uuid}", "    sni: www.bing.com", "    skip-cert-verify: true", "    alpn:", "      - h3", "    udp: true", "", ""]; names.append(name)
+        elif proto == "tuic":
+            rest = line.split("://", 1)[1]; creds = rest.split("@")[0]
+            uuid = creds.split(":")[0]; password = ":".join(creds.split(":")[1:])
+            hp = rest.split("@", 1)[1]; host = hp.split(":")[0]; port = hp.split(":")[1].split("?")[0] if ":" in hp else "443"
+            name = urllib.parse.unquote(line.split("#")[-1]) or host
+            out += [f'  - name: "{name}"', "    type: tuic", f"    server: {host}", f"    port: {port}", f"    uuid: {uuid}", f"    password: {password}", "    sni: www.bing.com", "    skip-cert-verify: true", "    alpn:", "      - h3", "    udp: true", "", ""]; names.append(name)
+pg = ["proxy-groups:", "  - name: auto", "    type: url-test", "    disable-udp: false", "    proxies:"]
+pg += [f"      - {n}" for n in names]
+pg += ['    url: "http://www.gstatic.com/generate_204"', "    interval: 300", "", "  - name: manual", "    type: select", "    proxies:"]
+pg += [f"      - {n}" for n in names] + ["      - DIRECT", ""]
+pg += ["  - name: urltest", "    type: url-test", "    disable-udp: false", "    proxies:"]
+pg += [f"      - {n}" for n in names]
+pg += ['    url: "http://www.gstatic.com/generate_204"', "    interval: 300", "", "rules:", "  - GEOIP,CN,DIRECT", "  - MATCH,auto", ""]
+with open(ofile, "w") as f: f.write("\n".join(out) + "\n" + "\n".join(pg) + "\n")
+PYGEN
+    chmod +x /etc/sing-box/generate_clash.py
+}
+create_generate_clash_py
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -220,9 +299,9 @@ install_singbox() {
     # latest_version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | jq -r '[.[] | select(.prerelease==false)][0].tag_name | sub("^v"; "")')
     # curl -sLo "${work_dir}/${server_name}.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v${latest_version}/sing-box-${latest_version}-linux-${ARCH}.tar.gz"
     # curl -sLo "${work_dir}/qrencode" "https://github.com/eooce/test/releases/download/${ARCH}/qrencode-linux-${ARCH}"
-    curl -sLo "${work_dir}/qrencode" "https://$ARCH.ssss.nyc.mn/qrencode"
-    curl -sLo "${work_dir}/sing-box" "https://$ARCH.ssss.nyc.mn/sb"
-    curl -sLo "${work_dir}/argo" "https://$ARCH.ssss.nyc.mn/bot"
+    QRENCODE_URL="https://github.com/eooce/test/releases/download/${ARCH}/qrencode-linux-${ARCH}" && curl -sLo "${work_dir}/qrencode" "$QRENCODE_URL"
+    SB_VERSION=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep tag_name | head -1 | sed -E "s/.*\"v?([^\"]+)\"*/\1/") && SB_URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/sing-box-${SB_VERSION}-linux-${ARCH}.tar.gz" && curl -sLo "${work_dir}/sing-box.tar.gz" "$SB_URL" && tar -xzf "${work_dir}/sing-box.tar.gz" -C "${work_dir}/" && mv "${work_dir}/sing-box-${SB_VERSION}-linux-${ARCH}/sing-box" "${work_dir}/" && rm -rf "${work_dir}/sing-box.tar.gz" "${work_dir}/sing-box-${SB_VERSION}-linux-${ARCH}"
+    ARGO_VERSION=$(curl -s "https://api.github.com/repos/cloudflare/cloudflared/releases/latest" | grep tag_name | head -1 | sed -E "s/.*\"([^\"]+)\"*/\1/") && curl -sLo "${work_dir}/argo" "https://github.com/cloudflare/cloudflared/releases/download/${ARGO_VERSION}/cloudflared-linux-${ARCH}"
     # tar -xzvf "${work_dir}/${server_name}.tar.gz" -C "${work_dir}/" && \
     # mv "${work_dir}/sing-box-${latest_version}-linux-${ARCH}/sing-box" "${work_dir}/" && \
     # rm -rf "${work_dir}/${server_name}.tar.gz" "${work_dir}/sing-box-${latest_version}-linux-${ARCH}"
@@ -358,7 +437,7 @@ cat > "${config_dir}" << EOF
         "172.16.0.2/32",
         "2606:4700:110:8dfe:d141:69bb:6b80:925/128"
       ],
-      "private_key": "YFYOAdbw1bKTHlNNi+aEjBM3BO7unuFC5rOkMRAz9XY=",
+      "private_key": "",
       "peers": [
         {
           "address": "engage.cloudflareclient.com",
@@ -523,26 +602,26 @@ vless://${uuid}@${server_ip}:${vless_port}?encryption=none&flow=xtls-rprx-vision
 
 vmess://$(echo "$VMESS" | base64 -w0)
 
-hysteria2://${uuid}@${server_ip}:${hy2_port}/?sni=www.bing.com&insecure=1&alpn=h3&obfs=none#${isp}
+hysteria2://${uuid}@${server_ip}:${hy2_port}/?sni=www.bing.com&alpn=h3&obfs=none#${isp}
 
-tuic://${uuid}:${password}@${server_ip}:${tuic_port}?sni=www.bing.com&congestion_control=bbr&udp_relay_mode=native&alpn=h3&allow_insecure=1#${isp}
+tuic://${uuid}:${password}@${server_ip}:${tuic_port}?sni=www.bing.com&congestion_control=bbr&udp_relay_mode=native&alpn=h3#${isp}
 EOF
 echo ""
 while IFS= read -r line; do echo -e "${purple}$line"; done < ${work_dir}/url.txt
-base64 -w0 ${work_dir}/url.txt > ${work_dir}/sub.txt
+python3 /etc/sing-box/generate_clash.py ${work_dir}/url.txt ${work_dir}/sub.txt
 chmod 644 ${work_dir}/sub.txt
 yellow "\n温馨提醒：需打开V2rayN或其他软件里的 "跳过证书验证"，或将节点的Insecure或TLS里设置为"true"\n"
 green "V2rayN,Shadowrocket,Nekobox,Loon,Karing,Sterisand订阅链接：http://${server_ip}:${nginx_port}/${password}\n"
 $work_dir/qrencode "http://${server_ip}:${nginx_port}/${password}"
 yellow "\n=========================================================================================="
-green "\n\nClash,Mihomo系列订阅链接：https://sublink.eooce.com/clash?config=http://${server_ip}:${nginx_port}/${password}\n"
-$work_dir/qrencode "https://sublink.eooce.com/clash?config=http://${server_ip}:${nginx_port}/${password}"
+green "\n\nClash,Mihomo系列订阅链接：http://${server_ip}:${nginx_port}/${password}\n"
+$work_dir/qrencode "http://${server_ip}:${nginx_port}/${password}"
 yellow "\n=========================================================================================="
-green "\n\nSing-box订阅链接：https://sublink.eooce.com/singbox?config=http://${server_ip}:${nginx_port}/${password}\n"
-$work_dir/qrencode "https://sublink.eooce.com/singbox?config=http://${server_ip}:${nginx_port}/${password}"
+green "\n\nSing-box订阅链接：http://${server_ip}:${nginx_port}/${password}\n"
+$work_dir/qrencode "http://${server_ip}:${nginx_port}/${password}"
 yellow "\n=========================================================================================="
-green "\n\nSurge订阅链接：https://sublink.eooce.com/surge?config=http://${server_ip}:${nginx_port}/${password}\n"
-$work_dir/qrencode "https://sublink.eooce.com/surge?config=http://${server_ip}:${nginx_port}/${password}"
+green "\n\nSurge订阅链接：http://${server_ip}:${nginx_port}/${password}\n"
+$work_dir/qrencode "http://${server_ip}:${nginx_port}/${password}"
 yellow "\n==========================================================================================\n"
 }
 
@@ -574,7 +653,7 @@ server {
 
     location = /$password {
         alias /etc/sing-box/sub.txt;
-        default_type 'text/plain; charset=utf-8';
+        default_type 'application/x-yaml; charset=utf-8';
         add_header Cache-Control "no-cache, no-store, must-revalidate";
         add_header Pragma "no-cache";
         add_header Expires "0";
@@ -912,7 +991,7 @@ change_config() {
                     restart_singbox
                     allow_port $new_port/tcp > /dev/null 2>&1
                     sed -i 's/\(vless:\/\/[^@]*@[^:]*:\)[0-9]\{1,\}/\1'"$new_port"'/' $client_dir
-                    base64 -w0 /etc/sing-box/url.txt > /etc/sing-box/sub.txt
+                    python3 /etc/sing-box/generate_clash.py /etc/sing-box/url.txt /etc/sing-box/sub.txt
                     while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
                     green "\nvless-reality端口已修改成：${purple}$new_port${re} ${green}请更新订阅或手动更改vless-reality端口${re}\n"
                     ;;
@@ -923,7 +1002,7 @@ change_config() {
                     restart_singbox
                     allow_port $new_port/udp > /dev/null 2>&1
                     sed -i 's/\(hysteria2:\/\/[^@]*@[^:]*:\)[0-9]\{1,\}/\1'"$new_port"'/' $client_dir
-                    base64 -w0 $client_dir > /etc/sing-box/sub.txt
+                    python3 /etc/sing-box/generate_clash.py $client_dir /etc/sing-box/sub.txt
                     while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
                     green "\nhysteria2端口已修改为：${purple}${new_port}${re} ${green}请更新订阅或手动更改hysteria2端口${re}\n"
                     ;;
@@ -934,7 +1013,7 @@ change_config() {
                     restart_singbox
                     allow_port $new_port/udp > /dev/null 2>&1
                     sed -i 's/\(tuic:\/\/[^@]*@[^:]*:\)[0-9]\{1,\}/\1'"$new_port"'/' $client_dir
-                    base64 -w0 $client_dir > /etc/sing-box/sub.txt
+                    python3 /etc/sing-box/generate_clash.py $client_dir /etc/sing-box/sub.txt
                     while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
                     green "\ntuic端口已修改为：${purple}${new_port}${re} ${green}请更新订阅或手动更改tuic端口${re}\n"
                     ;;
@@ -991,7 +1070,7 @@ change_config() {
             VMESS="{ \"v\": \"2\", \"ps\": \"${isp}\", \"add\": \"www.visa.com.tw\", \"port\": \"443\", \"id\": \"${new_uuid}\", \"aid\": \"0\", \"scy\": \"none\", \"net\": \"ws\", \"type\": \"none\", \"host\": \"${argodomain}\", \"path\": \"/vmess-argo?ed=2560\", \"tls\": \"tls\", \"sni\": \"${argodomain}\", \"alpn\": \"\", \"fp\": \"\", \"allowlnsecure\": \"flase\"}"
             encoded_vmess=$(echo "$VMESS" | base64 -w0)
             sed -i -E '/vmess:\/\//{s@vmess://.*@vmess://'"$encoded_vmess"'@}' $client_dir
-            base64 -w0 $client_dir > /etc/sing-box/sub.txt
+            python3 /etc/sing-box/generate_clash.py $client_dir /etc/sing-box/sub.txt
             while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
             green "\nUUID已修改为：${purple}${new_uuid}${re} ${green}请更新订阅或手动更改所有节点的UUID${re}\n"
             ;;
@@ -1020,7 +1099,7 @@ change_config() {
                 ' "$config_dir" > "$config_file.tmp" && mv "$config_file.tmp" "$config_dir"
                 restart_singbox
                 sed -i "s/\(vless:\/\/[^\?]*\?\([^\&]*\&\)*sni=\)[^&]*/\1$new_sni/" $client_dir
-                base64 -w0 $client_dir > /etc/sing-box/sub.txt
+                python3 /etc/sing-box/generate_clash.py $client_dir /etc/sing-box/sub.txt
                 while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
                 echo ""
                 green "\nReality sni已修改为：${purple}${new_sni}${re} ${green}请更新订阅或手动更改reality节点的sni域名${re}\n"
@@ -1072,8 +1151,8 @@ EOF
             line_number=$(grep -n 'hysteria2://' $client_dir | cut -d':' -f1)
             isp=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g' || echo "vps")
             sed -i.bak "/hysteria2:/d" $client_dir
-            sed -i "${line_number}i hysteria2://$uuid@$ip:$listen_port?peer=www.bing.com&insecure=1&alpn=h3&obfs=none&mport=$listen_port,$min_port-$max_port#$isp" $client_dir
-            base64 -w0 $client_dir > /etc/sing-box/sub.txt
+            sed -i "${line_number}i hysteria2://$uuid@$ip:$listen_port?peer=www.bing.com&alpn=h3&obfs=none&mport=$listen_port,$min_port-$max_port#$isp" $client_dir
+            python3 /etc/sing-box/generate_clash.py $client_dir /etc/sing-box/sub.txt
             while IFS= read -r line; do yellow "$line"; done < ${work_dir}/url.txt
             green "\nhysteria2端口跳跃已开启,跳跃端口为：${purple}$min_port-$max_port${re} ${green}请更新订阅或手动复制以上hysteria2节点${re}\n"
             ;;
@@ -1091,7 +1170,7 @@ EOF
                 manage_packages uninstall iptables ip6tables iptables-persistent iptables-service > /dev/null 2>&1
             fi
             sed -i '/hysteria2/s/&mport=[^#&]*//g' /etc/sing-box/url.txt
-            base64 -w0 $client_dir > /etc/sing-box/sub.txt
+            python3 /etc/sing-box/generate_clash.py $client_dir /etc/sing-box/sub.txt
             green "\n端口跳跃已删除\n"
             ;;
         6)  change_cfip ;;
@@ -1281,7 +1360,7 @@ ingress:
   - hostname: $ArgoDomain
     service: http://localhost:8001
     originRequest:
-      noTLSVerify: true
+      noTLSVerify: false
   - service: http_status:404
 EOF
 
@@ -1379,7 +1458,7 @@ encoded_updated_vmess=$(echo "$updated_vmess" | base64 | tr -d '\n')
 new_vmess_url="${vmess_prefix}${encoded_updated_vmess}"
 new_content=$(echo "$content" | sed "s|$vmess_url|$new_vmess_url|")
 echo "$new_content" > "$client_dir"
-base64 -w0 ${work_dir}/url.txt > ${work_dir}/sub.txt
+python3 /etc/sing-box/generate_clash.py ${work_dir}/url.txt ${work_dir}/sub.txt
 green "vmess节点已更新,更新订阅或手动复制以下vmess-argo节点\n"
 purple "$new_vmess_url\n" 
 }
@@ -1391,9 +1470,9 @@ check_nodes() {
     lujing=$(sed -n 's|.*location = /\([^ ]*\).*|\1|p' "/etc/nginx/conf.d/sing-box.conf")
     sub_port=$(sed -n 's/^\s*listen \([0-9]\+\);/\1/p' "/etc/nginx/conf.d/sing-box.conf")
     base64_url="http://${server_ip}:${sub_port}/${lujing}"
-    green "\n\nSurge订阅链接: ${purple}https://sublink.eooce.com/surge?config=${base64_url}${re}\n"
-    green "sing-box订阅链接: ${purple}https://sublink.eooce.com/singbox?config=${base64_url}${purple}\n"
-    green "Mihomo/Clash系列订阅链接: ${purple}https://sublink.eooce.com/clash?config=${base64_url}${re}\n"
+    green "\n\nSurge订阅链接: ${purple}${base64_url}${re}\n"
+    green "sing-box订阅链接: ${purple}${base64_url}${purple}\n"
+    green "Mihomo/Clash系列订阅链接: ${purple}${base64_url}${re}\n"
     green "V2rayN,Shadowrocket,Nekobox,Loon,Karing,Sterisand订阅链接: ${purple}${base64_url}${re}\n"
 }
 
@@ -1454,7 +1533,7 @@ new_encoded_part=$(echo "$updated_json" | base64 -w0)
 new_vmess_url="vmess://$new_encoded_part"
 new_content=$(echo "$content" | sed "s|$vmess_url|$new_vmess_url|")
 echo "$new_content" > "$client_dir"
-base64 -w0 "${work_dir}/url.txt" > "${work_dir}/sub.txt"
+python3 /etc/sing-box/generate_clash.py "${work_dir}/url.txt" "${work_dir}/sub.txt"
 green "\nvmess节点优选域名已更新为：${purple}${cfip}:${cfport},${green}更新订阅或手动复制以下vmess-argo节点${re}\n"
 purple "$new_vmess_url\n"
 }
@@ -1532,7 +1611,7 @@ while true; do
         7) disable_open_sub ;;
         8) 
            clear
-           bash <(curl -Ls ssh_tool.eooce.com)
+           yellow "SSH工具已禁用（安全原因：外部脚本来源不明）"
            ;;           
         0) exit 0 ;;
         *) red "无效的选项，请输入 0 到 8" ;;
