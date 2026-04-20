@@ -1,0 +1,22 @@
+{
+  "name": "sing-box-deploy",
+  "version": "1.0.0",
+  "singbox_version": "1.13.9",
+  "created": "2026-04-20",
+  "author": "shaw1001",
+  "description": "sing-box 四合一一键部署技能",
+  "keywords": ["sing-box", "vless", "vmess", "hysteria2", "tuic", "reality", "proxy", "vpn"],
+  "triggers": [
+    "sing-box 部署",
+    "sing-box 安装",
+    "四合一部署",
+    "vless reality 安装"
+  ],
+  "files": {
+    "SKILL.md": "技能说明文档",
+    "VERSION.md": "版本变更记录",
+    "sing-box-deploy.sh": "一键部署脚本"
+  },
+  "repo": "https://github.com/shaw1001/sing-box",
+  "raw_url": "https://raw.githubusercontent.com/shaw1001/sing-box/main/sing-box-deploy.sh"
+}
